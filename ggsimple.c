@@ -379,7 +379,13 @@ static void gg_merge_seg(const ed_intv_t *intv, int32_t n_ss, mg_msseg_t *ss)
 	for (j0 = 0, j = 1; j < n_ss; ++j) {
 		mg_msseg_t *s0 = &ss[j0], *s1 = &ss[j];
 		int32_t i, mid = 0;
-		for (i = s0->en + 1; i < s1->st; ++i)
+		// mss segments are half-open [st, en), so the gap between s0 and s1 spans
+		// intervals [s0->en, s1->st). The original `s0->en + 1` skipped the first
+		// gap interval; when that gap is a single long exact-match interval (two
+		// insertions separated by conserved sequence) mid stayed 0, so the test
+		// below always merged them into one oversized event that the flank-length
+		// check later discards -- dropping clustered insertions. Start at s0->en.
+		for (i = s0->en; i < s1->st; ++i)
 			mid += intv[i].sc;
 		//fprintf(stderr, "XX\t%d\t%d\t%d\t%d\t%d\t%d\n", j, s0->sc, mid, s1->sc, s0->en+1, s1->st);
 		if (-mid < s0->sc * 0.2 && -mid < s1->sc * 0.2) { // FIXME: mid is sometimes 0
