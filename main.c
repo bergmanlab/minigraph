@@ -58,6 +58,7 @@ static ko_longopt_t long_options[] = {
 	{ "dbg-lc-prof",  ko_no_argument,       407 },
 	{ "dbg-mwf-long", ko_no_argument,       408 },
 	{ "dbg-mwf-seq",  ko_no_argument,       409 },
+	{ "dbg-seed",     ko_no_argument,       410 },
 	{ 0, 0, 0 }
 };
 
@@ -175,6 +176,7 @@ int main(int argc, char *argv[])
 		else if (c == 407) mg_dbg_flag |= MG_DBG_LC_PROF;     // --dbg-lc-prof
 		else if (c == 408) mg_dbg_flag |= MG_DBG_MINIWFA;     // --dbg-mwf-long
 		else if (c == 409) mg_dbg_flag |= MG_DBG_MWF_SEQ;     // --dbg-mwf-seq
+		else if (c == 410) mg_dbg_flag |= MG_DBG_SEED;        // --dbg-seed
 		else if (c == 'U') {
 			opt.occ_max1 = (int)mm_parse_num2(o.arg, &s);
 			if (*s == ',') opt.occ_max1_cap = (int)mm_parse_num2(s + 1, &s);
