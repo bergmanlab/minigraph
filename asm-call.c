@@ -48,7 +48,32 @@ void mg_call_asm(const gfa_t *g, int32_t n_seq, const mg_bseq1_t *seq, mg_gchain
 		const mg_gchains_t *gt = gcs[t];
 		for (i = 0; i < gt->n_gc; ++i) {
 			const mg_gchain_t *gc = &gt->gc[i];
-			int32_t st = -1;
+			int32_t st = -1, *bq = 0;
+			if (gc->p) {
+				// With base alignment available, record the exact query offset at
+				// which the alignment crosses into each lchain's segment. Anchor
+				// endpoints (the fallback below) undershoot the junction by up to
+				// a minimizer span, and by much more when the occ filter thins
+				// anchors near the junction; the cigar walk (same as ggsimple's
+				// gg_write_intv) gives base-precise bubble coordinates instead.
+				int32_t k, l = 0, x = gc->ps, y = gc->qs;
+				GFA_MALLOC(bq, gc->cnt);
+				bq[0] = y;
+				for (k = 0; k < gc->p->n_cigar; ++k) {
+					int32_t op = gc->p->cigar[k]&0xf, rl = gc->p->cigar[k]>>4;
+					if (op == 2 || op == 7 || op == 8) {
+						while (l + 1 < gc->cnt && x + rl > g->seg[gt->lc[gc->off + l].v>>1].len) {
+							int32_t adv = g->seg[gt->lc[gc->off + l].v>>1].len - x;
+							if (op == 7 || op == 8) y += adv;
+							rl -= adv, x = 0, ++l;
+							bq[l] = y;
+						}
+						x += rl;
+						if (op == 7 || op == 8) y += rl;
+					} else if (op == 1) y += rl;
+				}
+				while (++l < gc->cnt) bq[l] = y; // in case the cigar ends early
+			}
 			for (j = 1; j < gc->cnt; ++j) {
 				const mg_llchain_t *lc = &gt->lc[gc->off + j];
 				if (!ca[lc->v>>1].is_stem && ca[(lc-1)->v>>1].is_stem) {
@@ -66,8 +91,12 @@ void mg_call_asm(const gfa_t *g, int32_t n_seq, const mg_bseq1_t *seq, mg_gchain
 
 					// test overlap on the query
 					span = gt->a[gt->lc[st].off].y >> 32 & 0xff;
-					qs = (int32_t)gt->a[gt->lc[st - 1].off + gt->lc[st - 1].cnt - 1].y + 1; // NB: it is fine even if .cnt==0
-					qe = (int32_t)gt->a[gt->lc[en].off].y + 1 - span;
+					if (bq) { // base-precise: query offsets where the alignment crosses the stem junctions
+						qs = bq[st - gc->off], qe = bq[en - gc->off];
+					} else {
+						qs = (int32_t)gt->a[gt->lc[st - 1].off + gt->lc[st - 1].cnt - 1].y + 1; // NB: it is fine even if .cnt==0
+						qe = (int32_t)gt->a[gt->lc[en].off].y + 1 - span;
+					}
 					n_ovlp = mg_intv_overlap(0, qoff[t+1] - qoff[t], &qintv[qoff[t]], qs, qe, &ovlp, &m_ovlp);
 					if (n_ovlp > 1) continue; // overlap on the query - not orthologous
 
@@ -111,6 +140,7 @@ void mg_call_asm(const gfa_t *g, int32_t n_seq, const mg_bseq1_t *seq, mg_gchain
 					p->t = t, p->i = i, p->st = st, p->en = en, p->strand = strand, p->qs = qs, p->qe = qe, p->glen = glen;
 				}
 			}
+			free(bq);
 		}
 	}
 
