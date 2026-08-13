@@ -321,33 +321,48 @@ mg128_t *mg_lchain_rmq(int max_dist, int max_dist_inner, int bw, int max_chn_ski
 			assert(q->y >= lo.y && q->y <= hi.y);
 			sc = f[j] + comput_sc_simple(&a[i], &a[j], chn_pen_gap, chn_pen_skip, &exact, &width);
 			if (width <= bw && sc > max_f) max_f = sc, max_j = j;
-			if (!exact && root_inner && (int32_t)a[i].y > 0) {
-				lc_elem_t *lo, *hi;
-				s.y = (int32_t)a[i].y - 1, s.i = n;
-				krmq_interval(lc_elem, root_inner, &s, &lo, &hi);
-				if (lo) {
-					const lc_elem_t *q;
-					int32_t width, n_rmq_iter = 0;
-					krmq_itr_t(lc_elem) itr;
-					krmq_itr_find(lc_elem, root_inner, lo, &itr);
-					while ((q = krmq_at(&itr)) != 0) {
-						if (q->y < (int32_t)a[i].y - max_dist_inner) break;
-						++n_rmq_iter;
-						j = q->i;
-						sc = f[j] + comput_sc_simple(&a[i], &a[j], chn_pen_gap, chn_pen_skip, 0, &width);
-						if (width <= bw) {
-							if (sc > max_f) {
-								max_f = sc, max_j = j;
-								if (n_skip > 0) --n_skip;
-							} else if (t[j] == (int32_t)i) {
-								if (++n_skip > max_chn_skip)
-									break;
+			if (!exact && (int32_t)a[i].y > 0) {
+				// The 1D RMQ priority approximates the gap cost as 0.5*pen_gap*(dx+dy),
+				// which overcharges near-diagonal predecessors: a diagonal continuation
+				// across an anchor desert (e.g. minimizers dropped by the occ filter
+				// inside a high-copy repeat) truly costs ~pen_skip*d but is priced as
+				// ~0.5*pen_gap*2d, so a high-scoring chain far off-diagonal wins the RMQ
+				// and inserts a spurious indel. When the single RMQ candidate proposes
+				// an indel of size `width` beyond the inner window, exact-score the
+				// outer tree across that same span so a diagonal continuation can
+				// compete on the true cost. Effort scales with the proposed indel and
+				// is bounded by max_chn_skip like the inner scan below.
+				int32_t ext = width <= bw && width > max_dist_inner? (width < max_dist? width : max_dist) : 0;
+				lc_elem_t *root_itr = ext > 0? root : root_inner;
+				int32_t lim = ext > 0? ext : max_dist_inner;
+				if (root_itr) {
+					lc_elem_t *lo, *hi;
+					s.y = (int32_t)a[i].y - 1, s.i = n;
+					krmq_interval(lc_elem, root_itr, &s, &lo, &hi);
+					if (lo) {
+						const lc_elem_t *q;
+						int32_t width, n_rmq_iter = 0;
+						krmq_itr_t(lc_elem) itr;
+						krmq_itr_find(lc_elem, root_itr, lo, &itr);
+						while ((q = krmq_at(&itr)) != 0) {
+							if (q->y < (int32_t)a[i].y - lim) break;
+							++n_rmq_iter;
+							j = q->i;
+							sc = f[j] + comput_sc_simple(&a[i], &a[j], chn_pen_gap, chn_pen_skip, 0, &width);
+							if (width <= bw) {
+								if (sc > max_f) {
+									max_f = sc, max_j = j;
+									if (n_skip > 0) --n_skip;
+								} else if (t[j] == (int32_t)i) {
+									if (++n_skip > max_chn_skip)
+										break;
+								}
+								if (p[j] >= 0) t[p[j]] = i;
 							}
-							if (p[j] >= 0) t[p[j]] = i;
+							if (!krmq_itr_prev(lc_elem, &itr)) break;
 						}
-						if (!krmq_itr_prev(lc_elem, &itr)) break;
+						n_iter += n_rmq_iter;
 					}
-					n_iter += n_rmq_iter;
 				}
 			}
 		}
