@@ -373,7 +373,63 @@ static void gg_score_intv(int32_t n_intv, ed_intv_t *intv)
 	}
 }
 
-static void gg_merge_seg(const ed_intv_t *intv, int32_t n_ss, mg_msseg_t *ss)
+// Build the insert for mss segment [st, en) of chain i, returning the length of the graph path
+// it replaces once gfa_ins_adj() has shrunk the flanks the path and the query share.
+static int32_t gg_ins_init(const gfa_t *g, const mg_gchains_t *gt, int32_t i, const ed_intv_t *intv, int32_t st, int32_t en,
+						   int32_t pen, const mg_bseq1_t *s, int32_t t, gfa_ins_t *I, int32_t *ls_, int32_t *le_)
+{
+	const mg_gchain_t *gc = &gt->gc[i];
+	const ed_intv_t *is = &intv[st], *ie = &intv[en - 1];
+	int32_t ls = is->lc, le = ie->lc, pd;
+	assert(is->op != 7 && ie->op != 7);
+	I->ctg = t;
+	I->v[0] = gt->lc[ls].v;
+	I->v[1] = gt->lc[le].v;
+	I->voff[0] = is->vo;
+	I->voff[1] = ie->vo + (ie->op != 1? ie->len : 0);
+	I->coff[0] = is->qo;
+	I->coff[1] = ie->qo + (ie->op != 2? ie->len : 0);
+	assert(I->voff[0] <= g->seg[I->v[0]>>1].len);
+	assert(I->voff[1] <= g->seg[I->v[1]>>1].len);
+
+	if (I->voff[0] == 0) { // if an insert starts at pos 0, make it start at the end of the previous vertex in the chain
+		assert(ls - 1 >= gc->off);
+		I->v[0] = gt->lc[--ls].v;
+		I->voff[0] = g->seg[I->v[0]>>1].len;
+	}
+	if (I->voff[1] == g->seg[I->v[1]>>1].len) { // if an insert ends at the end of the vertex, make it end at the beginning of the next vertex
+		assert(le + 1 < gc->off + gc->cnt);
+		I->v[1] = gt->lc[++le].v;
+		I->voff[1] = 0;
+	}
+
+	pd = ie->po + (ie->op != 1? ie->len : 0) - is->po;
+	pd -= gfa_ins_adj(g, pen, I, s->seq);
+	*ls_ = ls, *le_ = le;
+	return pd;
+}
+
+// A copy of a sequence inserted inside an identical copy of itself (a TE landing in an older
+// copy of the same element) can chain with the new copy's body matched to the old one. Its two
+// ends then surface as separate candidates, and the conserved stretch between them scores as
+// a long match, so the gap test in gg_merge_seg() keeps them apart. They are one event: merged,
+// the pair shrinks under gfa_ins_adj() to a point insertion. Merge only then, and only when that
+// insertion would pass the end test in mg_ggsimple_cigar(), so no candidate is lost by merging.
+static int gg_is_split_ins(const gfa_t *g, const mg_gchains_t *gt, int32_t i, const ed_intv_t *intv, int32_t st, int32_t en,
+						   const mg_ggopt_t *opt, const mg_bseq1_t *s, int32_t t)
+{
+	gfa_ins_t I;
+	int32_t ls, le, qd;
+	if (gg_ins_init(g, gt, i, intv, st, en, opt->ggs_shrink_pen, s, t, &I, &ls, &le) != 0) return 0;
+	qd = I.coff[1] - I.coff[0];
+	if (qd < opt->min_var_len || I.coff[0] <= qd || I.coff[1] >= s->l_seq - qd) return 0;
+	if (mg_dbg_flag & MG_DBG_INSERT)
+		fprintf(stderr, "SI\t%s:[%d,%d|%d]\n", s->name, I.coff[0], I.coff[1], qd);
+	return 1;
+}
+
+static void gg_merge_seg(const gfa_t *g, const mg_gchains_t *gt, int32_t ci, const ed_intv_t *intv, int32_t n_ss, mg_msseg_t *ss,
+						 const mg_ggopt_t *opt, const mg_bseq1_t *s, int32_t t)
 {
 	int32_t j0, j;
 	for (j0 = 0, j = 1; j < n_ss; ++j) {
@@ -388,7 +444,8 @@ static void gg_merge_seg(const ed_intv_t *intv, int32_t n_ss, mg_msseg_t *ss)
 		for (i = s0->en; i < s1->st; ++i)
 			mid += intv[i].sc;
 		//fprintf(stderr, "XX\t%d\t%d\t%d\t%d\t%d\t%d\n", j, s0->sc, mid, s1->sc, s0->en+1, s1->st);
-		if (-mid < s0->sc * 0.2 && -mid < s1->sc * 0.2) { // FIXME: mid is sometimes 0
+		if ((-mid < s0->sc * 0.2 && -mid < s1->sc * 0.2) // FIXME: mid is sometimes 0
+			|| gg_is_split_ins(g, gt, ci, intv, s0->st, s1->en, opt, s, t)) {
 			s0->en = s1->en, s0->sc += s1->sc + mid;
 			s1->st = s1->en, s1->sc = 0;
 		} else j0 = j;
@@ -429,7 +486,7 @@ void mg_ggsimple_cigar(void *km, const mg_ggopt_t *opt, gfa_t *g, int32_t n_seq,
 			KCALLOC(km, sc, n_intv);
 			for (j = 0; j < n_intv; ++j) sc[j] = intv[j].sc;
 			ss = mg_mss_all(0, n_intv, sc, opt->min_var_len, 2 * opt->min_var_len, &n_ss);
-			gg_merge_seg(intv, n_ss, ss);
+			gg_merge_seg(g, gt, i, intv, n_ss, ss, opt, &seq[t], t);
 
 			// get regions to insert
 			for (j = 0; j < n_ss; ++j) {
@@ -441,32 +498,7 @@ void mg_ggsimple_cigar(void *km, const mg_ggopt_t *opt, gfa_t *g, int32_t n_seq,
 				st = ss[j].st, en = ss[j].en; // this is a CLOSED interval
 				if (st == en) continue;
 				is = &intv[st], ie = &intv[en - 1];
-				assert(is->op != 7 && ie->op != 7);
-
-				ls = is->lc, le = ie->lc;
-				I.ctg = t;
-				I.v[0] = gt->lc[ls].v;
-				I.v[1] = gt->lc[le].v;
-				I.voff[0] = is->vo;
-				I.voff[1] = ie->vo + (ie->op != 1? ie->len : 0);
-				I.coff[0] = is->qo;
-				I.coff[1] = ie->qo + (ie->op != 2? ie->len : 0);
-				assert(I.voff[0] <= g->seg[I.v[0]>>1].len);
-				assert(I.voff[1] <= g->seg[I.v[1]>>1].len);
-
-				if (I.voff[0] == 0) { // if an insert starts at pos 0, make it start at the end of the previous vertex in the chain
-					assert(ls - 1 >= gc->off);
-					I.v[0] = gt->lc[--ls].v;
-					I.voff[0] = g->seg[I.v[0]>>1].len;
-				}
-				if (I.voff[1] == g->seg[I.v[1]>>1].len) { // if an insert ends at the end of the vertex, make it end at the beginning of the next vertex
-					assert(le + 1 < gc->off + gc->cnt);
-					I.v[1] = gt->lc[++le].v;
-					I.voff[1] = 0;
-				}
-
-				pd = ie->po + (ie->op != 1? ie->len : 0) - is->po;
-				pd -= gfa_ins_adj(g, opt->ggs_shrink_pen, &I, seq[t].seq);
+				pd = gg_ins_init(g, gt, i, intv, st, en, opt->ggs_shrink_pen, &seq[t], t, &I, &ls, &le);
 
 				min_len = pd > I.coff[1] - I.coff[0]? pd : I.coff[1] - I.coff[0];
 				if (I.coff[0] <= min_len || I.coff[1] >= seq[t].l_seq - min_len) continue; // test if the event is close to ends again
