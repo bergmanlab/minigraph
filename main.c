@@ -23,6 +23,9 @@ void liftrlimit() {}
 static ko_longopt_t long_options[] = {
 	{ "version",      ko_no_argument,       300 },
 	{ "vc",           ko_no_argument,       301 },
+	{ "fold-stem-ins",   ko_required_argument, 350 },
+	{ "fold-stem-clean", ko_required_argument, 351 },
+	{ "fold-stem-max",   ko_required_argument, 352 },
 	{ "secondary",    ko_required_argument, 302 },
 	{ "ins-qovlp",    ko_required_argument, 303 },
 	{ "heap-sort",    ko_required_argument, 304 },
@@ -148,6 +151,9 @@ int main(int argc, char *argv[])
 		else if (c == 'S') opt.flag |= MG_M_WRITE_LCHAIN;
 		else if (c == 'c') opt.flag |= MG_M_CIGAR;
 		else if (c == 301) opt.flag |= MG_M_VERTEX_COOR;      // --vc
+		else if (c == 350) mg_call_absorb_min = atoi(o.arg);    // --fold-stem-ins
+		else if (c == 351) mg_call_absorb_clean = atoi(o.arg);  // --fold-stem-clean
+		else if (c == 352) mg_call_absorb_max = atoi(o.arg);    // --fold-stem-max
 		else if (c == 309) gpt.ggs_min_end_cnt = atoi(o.arg);  // --gg-min-end-cnt
 		else if (c == 310) gpt.ggs_min_end_frac = atof(o.arg); // --gg-min-end-frac
 		else if (c == 312) opt.flag |= MG_M_NO_COMP_PATH;     // --no-comp-path
@@ -259,6 +265,9 @@ int main(int argc, char *argv[])
 		fprintf(fp_help, "    -K NUM       minibatch size for mapping [500M]\n");
 		fprintf(fp_help, "    -S           output linear chains in * sName sLen nMz div sStart sEnd qStart qEnd\n");
 		fprintf(fp_help, "    --vc         output in the vertex coordinate\n");
+		fprintf(fp_help, "    --fold-stem-ins INT     with --call -c, fold an insertion of >=INT bp placed inside a bubble stem into the bubble [%d]\n", mg_call_absorb_min);
+		fprintf(fp_help, "    --fold-stem-clean INT   a gap-free match of >=INT bp shields a stem from folding [%d]\n", mg_call_absorb_clean);
+		fprintf(fp_help, "    --fold-stem-max INT     never move a bubble edge more than INT bp along the stem [%d]\n", mg_call_absorb_max);
 		fprintf(fp_help, "  Preset:\n");
 		fprintf(fp_help, "    -x STR       preset []\n");
 		fprintf(fp_help, "                 - lr: noisy long read mapping (the default)\n");

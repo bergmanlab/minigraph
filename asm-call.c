@@ -18,6 +18,34 @@ typedef struct {
 	int32_t qs, qe, glen;
 } bbaux_t;
 
+int32_t mg_call_absorb_min = 0, mg_call_absorb_clean = 30, mg_call_absorb_max = 1000;
+
+static inline int32_t cc_base(const gfa_t *g, uint32_t v, int32_t off)
+{
+	const gfa_seg_t *s = &g->seg[v>>1];
+	return (v&1) == 0? s->seq[off] : gfa_comp_table[(uint8_t)s->seq[s->len - 1 - off]];
+}
+
+// An insertion the alignment placed inside a bubble stem is reported as part of the bubble. Slide
+// it towards the junction first, as far as exact matches allow, so the stem keeps the bases it
+// shares with the inserted copy -- the shrink gfa_ins_adj() applies when the event is inserted.
+static int32_t ins_shift_right(const gfa_t *g, uint32_t v, int32_t x, int32_t n, const char *qseq, int32_t y)
+{
+	int32_t i, vlen = g->seg[v>>1].len, max = vlen - x;
+	if (max > n) max = n;
+	for (i = 0; i < max; ++i)
+		if ((cc_base(g, v, x + i) | 0x20) != ((uint8_t)qseq[y + i] | 0x20)) break;
+	return i;
+}
+
+static int32_t ins_shift_left(const gfa_t *g, uint32_t v, int32_t x, int32_t n, const char *qseq, int32_t y)
+{
+	int32_t i, max = x < n? x : n;
+	for (i = 0; i < max; ++i)
+		if ((cc_base(g, v, x - 1 - i) | 0x20) != ((uint8_t)qseq[y + n - 1 - i] | 0x20)) break;
+	return i;
+}
+
 void mg_call_asm(const gfa_t *g, int32_t n_seq, const mg_bseq1_t *seq, mg_gchains_t *const *gcs, int32_t min_mapq, int32_t min_blen)
 {
 	int32_t i, j, t, max_acnt, *soff, *qoff, n_bb, m_ovlp = 0, *ovlp = 0;
@@ -48,7 +76,7 @@ void mg_call_asm(const gfa_t *g, int32_t n_seq, const mg_bseq1_t *seq, mg_gchain
 		const mg_gchains_t *gt = gcs[t];
 		for (i = 0; i < gt->n_gc; ++i) {
 			const mg_gchain_t *gc = &gt->gc[i];
-			int32_t st = -1, *bq = 0;
+			int32_t st = -1, *bq = 0, *tq = 0, *hq = 0;
 			if (gc->p) {
 				// With base alignment available, record the exact query offset at
 				// which the alignment crosses into each lchain's segment. Anchor
@@ -56,21 +84,55 @@ void mg_call_asm(const gfa_t *g, int32_t n_seq, const mg_bseq1_t *seq, mg_gchain
 				// a minimizer span, and by much more when the occ filter thins
 				// anchors near the junction; the cigar walk (same as ggsimple's
 				// gg_write_intv) gives base-precise bubble coordinates instead.
+				// tq[l] / hq[l] additionally record where that junction sits once an insertion the
+				// alignment buried inside the stem is folded into the bubble: such an insertion is
+				// invisible in the output otherwise, and it pushes the junction past the real one. A
+				// gap-free match of mg_call_absorb_clean bases shields a stem, so only a stem whose
+				// tail is itself spuriously aligned (a diverged copy of the inserted sequence) folds.
 				int32_t k, l = 0, x = gc->ps, y = gc->qs;
+				int32_t clean = 0, chain_q = -1, chain_x = -1, head_q = -1, head_x = -1, head_open = 1;
 				GFA_MALLOC(bq, gc->cnt);
+				GFA_MALLOC(tq, gc->cnt);
+				GFA_MALLOC(hq, gc->cnt);
+				for (k = 0; k < gc->cnt; ++k) tq[k] = hq[k] = -1;
 				bq[0] = y;
 				for (k = 0; k < gc->p->n_cigar; ++k) {
 					int32_t op = gc->p->cigar[k]&0xf, rl = gc->p->cigar[k]>>4;
 					if (op == 2 || op == 7 || op == 8) {
 						while (l + 1 < gc->cnt && x + rl > g->seg[gt->lc[gc->off + l].v>>1].len) {
-							int32_t adv = g->seg[gt->lc[gc->off + l].v>>1].len - x;
+							int32_t vlen = g->seg[gt->lc[gc->off + l].v>>1].len;
+							int32_t adv = vlen - x;
+							if (op == 7) {
+								clean += adv;
+								if (clean >= mg_call_absorb_clean) chain_q = -1, head_open = 0;
+							} else clean = 0;
 							if (op == 7 || op == 8) y += adv;
+							if (chain_q >= 0 && vlen - chain_x <= mg_call_absorb_max) tq[l] = chain_q;
+							if (head_q >= 0 && head_x <= mg_call_absorb_max) hq[l] = head_q;
 							rl -= adv, x = 0, ++l;
 							bq[l] = y;
+							clean = 0, chain_q = -1, chain_x = -1, head_q = -1, head_x = -1, head_open = 1;
 						}
+						if (op == 7) {
+							clean += rl;
+							if (clean >= mg_call_absorb_clean) chain_q = -1, head_open = 0;
+						} else clean = 0;
 						x += rl;
 						if (op == 7 || op == 8) y += rl;
-					} else if (op == 1) y += rl;
+					} else if (op == 1) {
+						if (mg_call_absorb_min > 0 && rl >= mg_call_absorb_min) {
+							uint32_t v = gt->lc[gc->off + l].v;
+							if (chain_q < 0) chain_q = y + ins_shift_right(g, v, x, rl, seq[t].seq, y), chain_x = x;
+							if (head_open) head_q = y + rl - ins_shift_left(g, v, x, rl, seq[t].seq, y), head_x = x;
+						}
+						clean = 0;
+						y += rl;
+					}
+				}
+				if (l < gc->cnt) { // the vertex the cigar ends in
+					int32_t vlen = g->seg[gt->lc[gc->off + l].v>>1].len;
+					if (chain_q >= 0 && vlen - chain_x <= mg_call_absorb_max) tq[l] = chain_q;
+					if (head_q >= 0 && head_x <= mg_call_absorb_max) hq[l] = head_q;
 				}
 				while (++l < gc->cnt) bq[l] = y; // in case the cigar ends early
 			}
@@ -136,11 +198,17 @@ void mg_call_asm(const gfa_t *g, int32_t n_seq, const mg_bseq1_t *seq, mg_gchain
 								__func__, "><"[gt->lc[st].v&1], g->seg[gt->lc[st].v>>1].name, seq[t].name, qs, qe);
 						continue;
 					}
+					if (bq && mg_call_absorb_min > 0) { // fold stem-internal insertions into this bubble
+						int32_t a = tq[st - 1 - gc->off], b = hq[en - gc->off];
+						if (a >= 0 && a < qs) qs = a;
+						if (b >= 0 && b > qe) qe = b;
+						if (qs > qe) qs = qe;
+					}
 					p = &ba[bid];
 					p->t = t, p->i = i, p->st = st, p->en = en, p->strand = strand, p->qs = qs, p->qe = qe, p->glen = glen;
 				}
 			}
-			free(bq);
+			free(bq); free(tq); free(hq);
 		}
 	}
 

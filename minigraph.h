@@ -148,6 +148,7 @@ typedef struct {
 typedef struct mg_tbuf_s mg_tbuf_t;
 
 extern int mg_verbose, mg_dbg_flag;
+extern int32_t mg_call_absorb_min, mg_call_absorb_clean, mg_call_absorb_max;
 extern double mg_realtime0;
 
 #ifdef __cplusplus
