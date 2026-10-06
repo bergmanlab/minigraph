@@ -4,7 +4,9 @@
 #include <stdint.h>
 #include "gfa.h"
 
-#define MG_VERSION "0.21-r606"
+// "-bergman.N" marks the bergmanlab fork; miniME reads N from `minigraph --version`. N = 1: --call under -c reports
+// base-precise bubble coordinates from the cigar (80840e8), which miniME uses as call coordinates directly.
+#define MG_VERSION "0.21-r606-bergman.1"
 
 #define MG_M_SPLICE       0x10
 #define MG_M_SR           0x20
